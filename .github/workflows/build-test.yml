@@ -1,21 +1,17 @@
 name: build-test
 on:
-  push:
-    branches:
-      - "main"
-      - "dev-v3"
-      - "release-**"
-  pull_request:
-    branches:
-      - "main"
-      - "dev-v3"
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: runs-on label for every job
+        default: ubuntu-latest
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pin@v7.0.1
