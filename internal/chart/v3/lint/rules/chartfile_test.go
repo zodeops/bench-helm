@@ -1,0 +1,211 @@
+/*
+Copyright The Helm Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package rules
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	chart "helm.sh/helm/v4/internal/chart/v3"
+	"helm.sh/helm/v4/internal/chart/v3/lint/support"
+	chartutil "helm.sh/helm/v4/internal/chart/v3/util"
+)
+
+const (
+	badChartNameDir    = "testdata/badchartname"
+	badChartDir        = "testdata/badchartfile"
+	anotherBadChartDir = "testdata/anotherbadchartfile"
+)
+
+var (
+	badChartNamePath         = filepath.Join(badChartNameDir, "Chart.yaml")
+	badChartFilePath         = filepath.Join(badChartDir, "Chart.yaml")
+	nonExistingChartFilePath = filepath.Join(os.TempDir(), "Chart.yaml")
+)
+
+var (
+	badChart, _     = chartutil.LoadChartfile(badChartFilePath)
+	badChartName, _ = chartutil.LoadChartfile(badChartNamePath)
+)
+
+// Validation functions Test
+func TestValidateChartYamlNotDirectory(t *testing.T) {
+	_ = os.Mkdir(nonExistingChartFilePath, os.ModePerm)
+	defer os.Remove(nonExistingChartFilePath)
+
+	assert.Error(t, validateChartYamlNotDirectory(nonExistingChartFilePath), "validateChartYamlNotDirectory to return a linter error, got no error")
+}
+
+func TestValidateChartYamlFormat(t *testing.T) {
+	require.Error(t, validateChartYamlFormat(errors.New("Read error")), "validateChartYamlFormat to return a linter error, got no error")
+
+	assert.NoError(t, validateChartYamlFormat(nil), "validateChartYamlFormat to return no error, got a linter error")
+}
+
+func TestValidateChartName(t *testing.T) {
+	require.Error(t, validateChartName(badChart), "validateChartName to return a linter error, got no error")
+
+	assert.Error(t, validateChartName(badChartName), "expected validateChartName to return a linter error for an invalid name, got no error")
+}
+
+func TestValidateChartVersion(t *testing.T) {
+	failTest := []struct {
+		Version  string
+		ErrorMsg string
+	}{
+		{"", "version is required"},
+		{"1.2.3.4", "version '1.2.3.4' is not a valid SemVerV2"},
+		{"waps", "'waps' is not a valid SemVerV2"},
+		{"-3", "'-3' is not a valid SemVerV2"},
+		{"1.1", "'1.1' is not a valid SemVerV2"},
+		{"1", "'1' is not a valid SemVerV2"},
+	}
+
+	successTest := []string{"0.0.1", "0.0.1+build", "0.0.1-beta"}
+
+	for i, test := range failTest {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			badChart.Version = test.Version
+			require.ErrorContains(t, validateChartVersion(badChart), test.ErrorMsg, "validateChartVersion(%s) to return \"%s\", got no error", test.Version, test.ErrorMsg)
+		})
+	}
+
+	for _, version := range successTest {
+		badChart.Version = version
+		assert.NoError(t, validateChartVersion(badChart), "validateChartVersion(%s) to return no error, got a linter error", version)
+	}
+}
+
+func TestValidateChartMaintainer(t *testing.T) {
+	failTest := []struct {
+		Name     string
+		Email    string
+		ErrorMsg string
+	}{
+		{"", "", "each maintainer requires a name"},
+		{"", "test@test.com", "each maintainer requires a name"},
+		{"John Snow", "wrongFormatEmail.com", "invalid email"},
+	}
+
+	successTest := []struct {
+		Name  string
+		Email string
+	}{
+		{"John Snow", ""},
+		{"John Snow", "john@winterfell.com"},
+	}
+
+	for _, test := range failTest {
+		t.Run(fmt.Sprintf("%s, %s", test.Name, test.Email), func(t *testing.T) {
+			badChart.Maintainers = []*chart.Maintainer{{Name: test.Name, Email: test.Email}}
+			require.ErrorContains(t, validateChartMaintainer(badChart), test.ErrorMsg, "validateChartMaintainer(%s, %s) to return \"%s\", got no error", test.Name, test.Email, test.ErrorMsg)
+		})
+	}
+
+	for _, test := range successTest {
+		t.Run(fmt.Sprintf("%s, %s", test.Name, test.Email), func(t *testing.T) {
+			badChart.Maintainers = []*chart.Maintainer{{Name: test.Name, Email: test.Email}}
+			require.NoError(t, validateChartMaintainer(badChart), "validateChartMaintainer(%s, %s) to return no error", test.Name, test.Email)
+		})
+	}
+
+	// Testing for an empty maintainer
+	badChart.Maintainers = []*chart.Maintainer{nil}
+	assert.EqualError(t, validateChartMaintainer(badChart), "a maintainer entry is empty")
+}
+
+func TestValidateChartSources(t *testing.T) {
+	failTest := []string{"", "RiverRun", "john@winterfell", "riverrun.io"}
+	successTest := []string{"http://riverrun.io", "https://riverrun.io", "https://riverrun.io/blackfish"}
+	for _, test := range failTest {
+		t.Run(test, func(t *testing.T) {
+			badChart.Sources = []string{test}
+			require.ErrorContains(t, validateChartSources(badChart), "invalid source URL", "validateChartSources(%s) to return \"invalid source URL\", got no error", test)
+		})
+	}
+
+	for _, test := range successTest {
+		badChart.Sources = []string{test}
+		assert.NoError(t, validateChartSources(badChart), "validateChartSources(%s) to return no error", test)
+	}
+}
+
+func TestValidateChartIconPresence(t *testing.T) {
+	t.Run("Icon absent", func(t *testing.T) {
+		testChart := &chart.Metadata{
+			Icon: "",
+		}
+
+		assert.ErrorContains(t, validateChartIconPresence(testChart), "icon is recommended", "expected %q", "icon is recommended")
+	})
+	t.Run("Icon present", func(t *testing.T) {
+		testChart := &chart.Metadata{
+			Icon: "http://example.org/icon.png",
+		}
+		assert.NoError(t, validateChartIconPresence(testChart))
+	})
+}
+
+func TestValidateChartIconURL(t *testing.T) {
+	failTest := []string{"RiverRun", "john@winterfell", "riverrun.io"}
+	successTest := []string{"http://riverrun.io", "https://riverrun.io", "https://riverrun.io/blackfish.png"}
+	for _, test := range failTest {
+		t.Run(test, func(t *testing.T) {
+			badChart.Icon = test
+			require.ErrorContains(t, validateChartIconURL(badChart), "invalid icon URL", "validateChartIconURL(%s) to return \"invalid icon URL\", got no error", test)
+		})
+	}
+
+	for _, test := range successTest {
+		badChart.Icon = test
+		assert.NoError(t, validateChartIconURL(badChart), "validateChartIconURL(%s) to return no error", test)
+	}
+}
+
+func TestV3Chartfile(t *testing.T) {
+	t.Run("Chart.yaml basic validity issues", func(t *testing.T) {
+		linter := support.Linter{ChartDir: badChartDir}
+		Chartfile(&linter)
+		msgs := linter.Messages
+		expectedNumberOfErrorMessages := 6
+
+		require.Lenf(t, msgs, expectedNumberOfErrorMessages, "Expected %d errors", expectedNumberOfErrorMessages)
+		require.ErrorContains(t, msgs[0].Err, "name is required", "Unexpected message 0")
+		require.ErrorContains(t, msgs[1].Err, "apiVersion is required. The value must be \"v3\"", "Unexpected message 1")
+		require.ErrorContains(t, msgs[2].Err, "version '0.0.0.0' is not a valid SemVer", "Unexpected message 2")
+		assert.ErrorContains(t, msgs[3].Err, "icon is recommended", "Unexpected message 3")
+	})
+
+	t.Run("Chart.yaml validity issues due to type mismatch", func(t *testing.T) {
+		linter := support.Linter{ChartDir: anotherBadChartDir}
+		Chartfile(&linter)
+		msgs := linter.Messages
+		expectedNumberOfErrorMessages := 3
+
+		require.Lenf(t, msgs, expectedNumberOfErrorMessages, "Expected %d errors", expectedNumberOfErrorMessages)
+		require.ErrorContains(t, msgs[0].Err, "version should be of type string", "Unexpected message 0")
+		require.ErrorContains(t, msgs[1].Err, "version '7.2445e+06' is not a valid SemVer", "Unexpected message 1")
+		assert.ErrorContains(t, msgs[2].Err, "appVersion should be of type string", "Unexpected message 2")
+	})
+}
